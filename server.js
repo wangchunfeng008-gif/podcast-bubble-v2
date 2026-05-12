@@ -457,11 +457,99 @@ function createOSSClient() {
     endpoint,
     accessKeyId: cleanEnv(ALIYUN_ACCESS_KEY_ID),
     accessKeySecret: cleanEnv(ALIYUN_ACCESS_KEY_SECRET),
+    bucket: cleanEnv(ALIYUN_OSS_BUCKET),
+
+    // Render 到阿里云 OSS 有时候很慢，默认 60 秒容易超时
+    timeout: 300000
+  });
+}
+  const endpoint = cleanEnv(ALIYUN_OSS_ENDPOINT).replace(/\/+$/, "");
+
+  console.log("OSS Client 配置检查：", {
+    region: cleanEnv(ALIYUN_OSS_REGION),
+    endpoint,
+    bucket: cleanEnv(ALIYUN_OSS_BUCKET),
+    hasAccessKeyId: Boolean(cleanEnv(ALIYUN_ACCESS_KEY_ID)),
+    hasAccessKeySecret: Boolean(cleanEnv(ALIYUN_ACCESS_KEY_SECRET))
+  });
+
+  return new OSS({
+    region: cleanEnv(ALIYUN_OSS_REGION),
+    endpoint,
+    accessKeyId: cleanEnv(ALIYUN_ACCESS_KEY_ID),
+    accessKeySecret: cleanEnv(ALIYUN_ACCESS_KEY_SECRET),
     bucket: cleanEnv(ALIYUN_OSS_BUCKET)
   });
 }
 
 async function uploadAudioToOSS(localFilePath, filename) {
+  const client = createOSSClient();
+
+  const ext = normalizeAudioExt(path.extname(filename));
+  const objectName = `uploads/${Date.now()}-${Math.round(Math.random() * 1e9)}${ext}`;
+
+  console.log("准备以 Buffer 方式上传音频到 OSS：", {
+    localFilePath,
+    filename,
+    objectName
+  });
+
+  if (!fs.existsSync(localFilePath)) {
+    throw new Error(`本地音频文件不存在：${localFilePath}`);
+  }
+
+  const fileBuffer = fs.readFileSync(localFilePath);
+
+  if (!fileBuffer || !fileBuffer.length) {
+    throw new Error("读取到的音频文件为空，无法上传 OSS。");
+  }
+
+  console.log("音频 Buffer 读取成功，大小：", fileBuffer.length);
+
+  let lastError = null;
+
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      console.log(`开始上传 OSS，第 ${attempt}/3 次`);
+
+      await client.put(objectName, fileBuffer, {
+        timeout: 300000
+      });
+
+      console.log(`OSS 上传成功，第 ${attempt}/3 次`);
+
+      const signedUrl = client.signatureUrl(objectName, {
+        expires: 3600,
+        method: "GET"
+      });
+
+      console.log("OSS Buffer 上传成功：", {
+        objectName,
+        signedUrl
+      });
+
+      return {
+        objectName,
+        signedUrl
+      };
+    } catch (error) {
+      lastError = error;
+
+      console.warn(`OSS 上传失败，第 ${attempt}/3 次：`, {
+        message: error.message,
+        code: error.code,
+        status: error.status
+      });
+
+      if (attempt < 3) {
+        console.log("3 秒后重试 OSS 上传...");
+        await wait(3000);
+      }
+    }
+  }
+
+  throw lastError;
+}
   const client = createOSSClient();
 
   const ext = normalizeAudioExt(path.extname(filename));
