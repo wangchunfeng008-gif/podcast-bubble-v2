@@ -247,8 +247,6 @@ app.post("/api/transcribe", upload.single("audio"), async (req, res) => {
       console.warn("声音风格分析失败，仅保留 Fun-ASR speaker 左右：", profileError.message);
     }
 
-    // 关键修复：
-    // 只附加 gender / role 信息，不改 Fun-ASR 已经分好的 speaker left/right。
     dashscopeResult.segments = attachSpeakerProfileToSegments(
       dashscopeResult.segments,
       speakerProfile
@@ -284,7 +282,6 @@ app.post("/api/generate-stage-video", async (req, res) => {
     const styleHint = String(req.body?.styleHint || "");
     const speakerProfile = req.body?.speakerProfile || null;
 
-    // 关键：speakerProfile 只用于补充角色，不用于修改 speaker。
     if (speakerProfile && Array.isArray(segments)) {
       segments = attachSpeakerProfileToSegments(segments, speakerProfile);
     }
@@ -453,18 +450,42 @@ async function uploadAudioToOSS(localFilePath, filename) {
 
   const ext = normalizeAudioExt(path.extname(filename));
   const objectName = `uploads/${Date.now()}-${Math.round(Math.random() * 1e9)}${ext}`;
-
   const contentType = getAudioContentType(ext);
 
-  await client.put(objectName, localFilePath, {
+  console.log("准备以 Buffer 方式上传音频到 OSS：", {
+    localFilePath,
+    filename,
+    objectName,
+    contentType
+  });
+
+  if (!fs.existsSync(localFilePath)) {
+    throw new Error(`本地音频文件不存在：${localFilePath}`);
+  }
+
+  const fileBuffer = fs.readFileSync(localFilePath);
+
+  if (!fileBuffer || !fileBuffer.length) {
+    throw new Error("读取到的音频文件为空，无法上传 OSS。");
+  }
+
+  console.log("音频 Buffer 读取成功，大小：", fileBuffer.length);
+
+  await client.put(objectName, fileBuffer, {
     headers: {
-      "Content-Type": contentType
+      "Content-Type": contentType,
+      "Content-Length": fileBuffer.length
     }
   });
 
   const signedUrl = client.signatureUrl(objectName, {
     expires: 3600,
     method: "GET"
+  });
+
+  console.log("OSS Buffer 上传成功：", {
+    objectName,
+    signedUrl
   });
 
   return {
@@ -851,7 +872,6 @@ function attachSpeakerProfileToSegments(segments = [], speakerProfile) {
     return {
       ...item,
 
-      // 关键：绝不改 item.speaker，气泡左右继续由 Fun-ASR speaker_id 控制。
       speaker: item.speaker,
 
       speakerGender: profile?.voiceGender || "unknown",
