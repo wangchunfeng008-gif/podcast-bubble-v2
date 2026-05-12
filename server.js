@@ -78,6 +78,10 @@ const upload = multer({
   }
 });
 
+function cleanEnv(value) {
+  return String(value || "").trim();
+}
+
 function getMockTranscript() {
   const speakerProfile = {
     roleMode: "male-female",
@@ -167,15 +171,15 @@ app.get("/api/health", (req, res) => {
   res.json({
     ok: true,
     mock: USE_MOCK_TRANSCRIBE,
-    oss: Boolean(ALIYUN_OSS_BUCKET),
-    dashscope: Boolean(DASHSCOPE_API_KEY),
+    oss: Boolean(cleanEnv(ALIYUN_OSS_BUCKET)),
+    dashscope: Boolean(cleanEnv(DASHSCOPE_API_KEY)),
     qwenAudio: {
-      enabled: Boolean(DASHSCOPE_API_KEY),
+      enabled: Boolean(cleanEnv(DASHSCOPE_API_KEY)),
       model: QWEN_AUDIO_MODEL,
       confidenceThreshold: SPEAKER_GENDER_CONFIDENCE_THRESHOLD
     },
     video: {
-      enabled: Boolean(DASHSCOPE_API_KEY),
+      enabled: Boolean(cleanEnv(DASHSCOPE_API_KEY)),
       model: WAN_VIDEO_MODEL,
       duration: WAN_VIDEO_DURATION,
       ratio: WAN_VIDEO_RATIO,
@@ -196,7 +200,7 @@ app.post("/api/transcribe", upload.single("audio"), async (req, res) => {
     }
 
     const renderFileUrl = `${
-      PUBLIC_BASE_URL || `http://localhost:${PORT}`
+      cleanEnv(PUBLIC_BASE_URL) || `http://localhost:${PORT}`
     }/uploads/${req.file.filename}`;
 
     console.log("收到音频文件：", req.file.originalname);
@@ -266,7 +270,9 @@ app.post("/api/transcribe", upload.single("audio"), async (req, res) => {
 
     return res.status(500).json({
       error: "音频识别失败",
-      detail: error.message
+      detail: error.message,
+      code: error.code || null,
+      status: error.status || null
     });
   }
 });
@@ -408,19 +414,19 @@ app.get("/api/stage-video-task/:taskId", async (req, res) => {
 function validateEnv() {
   const missing = [];
 
-  if (!ALIYUN_ACCESS_KEY_ID) missing.push("ALIYUN_ACCESS_KEY_ID");
-  if (!ALIYUN_ACCESS_KEY_SECRET) missing.push("ALIYUN_ACCESS_KEY_SECRET");
-  if (!ALIYUN_OSS_BUCKET) missing.push("ALIYUN_OSS_BUCKET");
-  if (!ALIYUN_OSS_REGION) missing.push("ALIYUN_OSS_REGION");
-  if (!ALIYUN_OSS_ENDPOINT) missing.push("ALIYUN_OSS_ENDPOINT");
-  if (!PUBLIC_BASE_URL) missing.push("PUBLIC_BASE_URL");
-  if (!DASHSCOPE_API_KEY) missing.push("DASHSCOPE_API_KEY");
+  if (!cleanEnv(ALIYUN_ACCESS_KEY_ID)) missing.push("ALIYUN_ACCESS_KEY_ID");
+  if (!cleanEnv(ALIYUN_ACCESS_KEY_SECRET)) missing.push("ALIYUN_ACCESS_KEY_SECRET");
+  if (!cleanEnv(ALIYUN_OSS_BUCKET)) missing.push("ALIYUN_OSS_BUCKET");
+  if (!cleanEnv(ALIYUN_OSS_REGION)) missing.push("ALIYUN_OSS_REGION");
+  if (!cleanEnv(ALIYUN_OSS_ENDPOINT)) missing.push("ALIYUN_OSS_ENDPOINT");
+  if (!cleanEnv(PUBLIC_BASE_URL)) missing.push("PUBLIC_BASE_URL");
+  if (!cleanEnv(DASHSCOPE_API_KEY)) missing.push("DASHSCOPE_API_KEY");
 
   if (missing.length) {
     throw new Error(`缺少 Render 环境变量：${missing.join(", ")}`);
   }
 
-  if (PUBLIC_BASE_URL.includes("localhost")) {
+  if (cleanEnv(PUBLIC_BASE_URL).includes("localhost")) {
     throw new Error("PUBLIC_BASE_URL 不能是 localhost，必须是 Render 的公网地址。");
   }
 }
@@ -428,7 +434,7 @@ function validateEnv() {
 function validateVideoEnv() {
   const missing = [];
 
-  if (!DASHSCOPE_API_KEY) missing.push("DASHSCOPE_API_KEY");
+  if (!cleanEnv(DASHSCOPE_API_KEY)) missing.push("DASHSCOPE_API_KEY");
 
   if (missing.length) {
     throw new Error(`缺少视频生成环境变量：${missing.join(", ")}`);
@@ -436,12 +442,22 @@ function validateVideoEnv() {
 }
 
 function createOSSClient() {
+  const endpoint = cleanEnv(ALIYUN_OSS_ENDPOINT).replace(/\/+$/, "");
+
+  console.log("OSS Client 配置检查：", {
+    region: cleanEnv(ALIYUN_OSS_REGION),
+    endpoint,
+    bucket: cleanEnv(ALIYUN_OSS_BUCKET),
+    hasAccessKeyId: Boolean(cleanEnv(ALIYUN_ACCESS_KEY_ID)),
+    hasAccessKeySecret: Boolean(cleanEnv(ALIYUN_ACCESS_KEY_SECRET))
+  });
+
   return new OSS({
-    region: ALIYUN_OSS_REGION,
-    endpoint: ALIYUN_OSS_ENDPOINT,
-    accessKeyId: ALIYUN_ACCESS_KEY_ID,
-    accessKeySecret: ALIYUN_ACCESS_KEY_SECRET,
-    bucket: ALIYUN_OSS_BUCKET
+    region: cleanEnv(ALIYUN_OSS_REGION),
+    endpoint,
+    accessKeyId: cleanEnv(ALIYUN_ACCESS_KEY_ID),
+    accessKeySecret: cleanEnv(ALIYUN_ACCESS_KEY_SECRET),
+    bucket: cleanEnv(ALIYUN_OSS_BUCKET)
   });
 }
 
@@ -450,13 +466,11 @@ async function uploadAudioToOSS(localFilePath, filename) {
 
   const ext = normalizeAudioExt(path.extname(filename));
   const objectName = `uploads/${Date.now()}-${Math.round(Math.random() * 1e9)}${ext}`;
-  const contentType = getAudioContentType(ext);
 
   console.log("准备以 Buffer 方式上传音频到 OSS：", {
     localFilePath,
     filename,
-    objectName,
-    contentType
+    objectName
   });
 
   if (!fs.existsSync(localFilePath)) {
@@ -471,11 +485,7 @@ async function uploadAudioToOSS(localFilePath, filename) {
 
   console.log("音频 Buffer 读取成功，大小：", fileBuffer.length);
 
-  await client.put(objectName, fileBuffer, {
-    headers: {
-      "Content-Type": contentType
-    }
-  });
+  await client.put(objectName, fileBuffer);
 
   const signedUrl = client.signatureUrl(objectName, {
     expires: 3600,
@@ -543,7 +553,7 @@ async function transcribeWithDashScope(fileUrl) {
 }
 
 async function analyzeSpeakerProfileWithQwenAudio(audioUrl, segments = [], fullText = "") {
-  if (!DASHSCOPE_API_KEY) {
+  if (!cleanEnv(DASHSCOPE_API_KEY)) {
     throw new Error("缺少 DASHSCOPE_API_KEY，无法分析说话人声音风格。");
   }
 
@@ -606,7 +616,7 @@ ${speakerSummary}
   const response = await fetch(QWEN_MULTIMODAL_URL, {
     method: "POST",
     headers: {
-      Authorization: `Bearer ${DASHSCOPE_API_KEY}`,
+      Authorization: `Bearer ${cleanEnv(DASHSCOPE_API_KEY)}`,
       "Content-Type": "application/json"
     },
     body: JSON.stringify(body)
@@ -913,7 +923,7 @@ async function submitDashScopeTask(fileUrl) {
   const response = await fetch(DASHSCOPE_SUBMIT_URL, {
     method: "POST",
     headers: {
-      Authorization: `Bearer ${DASHSCOPE_API_KEY}`,
+      Authorization: `Bearer ${cleanEnv(DASHSCOPE_API_KEY)}`,
       "Content-Type": "application/json",
       "X-DashScope-Async": "enable"
     },
@@ -945,7 +955,7 @@ async function pollDashScopeTask(taskId) {
     const response = await fetch(`${DASHSCOPE_TASK_URL}/${taskId}`, {
       method: "GET",
       headers: {
-        Authorization: `Bearer ${DASHSCOPE_API_KEY}`
+        Authorization: `Bearer ${cleanEnv(DASHSCOPE_API_KEY)}`
       }
     });
 
@@ -1038,7 +1048,7 @@ async function submitStageVideoTask(prompt) {
   const response = await fetch(VIDEO_GENERATION_SUBMIT_URL, {
     method: "POST",
     headers: {
-      Authorization: `Bearer ${DASHSCOPE_API_KEY}`,
+      Authorization: `Bearer ${cleanEnv(DASHSCOPE_API_KEY)}`,
       "Content-Type": "application/json",
       "X-DashScope-Async": "enable"
     },
@@ -1074,7 +1084,7 @@ async function queryStageVideoTask(taskId) {
   const response = await fetch(`${DASHSCOPE_TASK_URL}/${taskId}`, {
     method: "GET",
     headers: {
-      Authorization: `Bearer ${DASHSCOPE_API_KEY}`
+      Authorization: `Bearer ${cleanEnv(DASHSCOPE_API_KEY)}`
     }
   });
 
@@ -1089,11 +1099,11 @@ async function queryStageVideoTask(taskId) {
 
 async function saveGeneratedVideoToOSS(videoUrl, taskId) {
   if (
-    !ALIYUN_ACCESS_KEY_ID ||
-    !ALIYUN_ACCESS_KEY_SECRET ||
-    !ALIYUN_OSS_BUCKET ||
-    !ALIYUN_OSS_REGION ||
-    !ALIYUN_OSS_ENDPOINT
+    !cleanEnv(ALIYUN_ACCESS_KEY_ID) ||
+    !cleanEnv(ALIYUN_ACCESS_KEY_SECRET) ||
+    !cleanEnv(ALIYUN_OSS_BUCKET) ||
+    !cleanEnv(ALIYUN_OSS_REGION) ||
+    !cleanEnv(ALIYUN_OSS_ENDPOINT)
   ) {
     throw new Error("OSS 环境变量不完整，无法转存生成视频。");
   }
@@ -1112,11 +1122,7 @@ async function saveGeneratedVideoToOSS(videoUrl, taskId) {
   const client = createOSSClient();
   const objectName = `generated-stage-videos/${taskId}-${Date.now()}.mp4`;
 
-  await client.put(objectName, buffer, {
-    headers: {
-      "Content-Type": "video/mp4"
-    }
-  });
+  await client.put(objectName, buffer);
 
   const signedUrl = client.signatureUrl(objectName, {
     expires: 7 * 24 * 60 * 60,
