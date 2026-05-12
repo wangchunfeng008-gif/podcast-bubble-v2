@@ -47,7 +47,7 @@ const WAN_VIDEO_SEED = process.env.WAN_VIDEO_SEED
   : undefined;
 
 const SPEAKER_GENDER_CONFIDENCE_THRESHOLD = Number(
-  process.env.SPEAKER_GENDER_CONFIDENCE_THRESHOLD || 0.65
+  process.env.SPEAKER_GENDER_CONFIDENCE_THRESHOLD || 0.55
 );
 
 const uploadDir = path.join(__dirname, "uploads");
@@ -85,82 +85,56 @@ function cleanEnv(value) {
 function getMockTranscript() {
   const speakerProfile = {
     roleMode: "male-female",
-    leftRole: "female",
-    rightRole: "male",
+    leftRole: "male",
+    rightRole: "female",
     speakerMap: {
       "0": {
-        side: "left",
+        side: "right",
         voiceGender: "female",
         confidence: 0.9
       },
       "1": {
-        side: "right",
+        side: "left",
         voiceGender: "male",
         confidence: 0.9
       }
     },
-    source: "mock"
+    source: "mock-gender-map"
   };
 
   return {
     fullText:
-      "今天我们来聊一个很适合年轻人的 AI 工具。它可以自动分析你的音频内容，并生成适合传播的文案。这个功能听起来还挺适合做播客摘要的。对，它也可以把不同说话人的内容做成左右气泡。",
+      "女生在右边说话。男生在左边回应。这样气泡会根据声音性别自动对应到正确角色上方。",
     speakerProfile,
     segments: [
       {
         id: "mock-0",
-        text: "今天我们来聊一个很适合年轻人的 AI 工具。",
+        text: "女生在右边说话。",
         start: 0,
-        end: 3.2,
-        speaker: "left",
+        end: 2.6,
+        speaker: "right",
         speakerRaw: "0",
         speakerGender: "female",
         voiceGender: "female",
+        genderConfidence: 0.9,
         roleMode: "male-female",
-        leftRole: "female",
-        rightRole: "male",
+        leftRole: "male",
+        rightRole: "female",
         speakerSource: "mock"
       },
       {
         id: "mock-1",
-        text: "它可以自动分析你的音频内容，并生成适合传播的文案。",
-        start: 3.2,
-        end: 7.1,
-        speaker: "right",
-        speakerRaw: "1",
-        speakerGender: "male",
-        voiceGender: "male",
-        roleMode: "male-female",
-        leftRole: "female",
-        rightRole: "male",
-        speakerSource: "mock"
-      },
-      {
-        id: "mock-2",
-        text: "这个功能听起来还挺适合做播客摘要的。",
-        start: 7.1,
-        end: 10.5,
+        text: "男生在左边回应。",
+        start: 2.6,
+        end: 5.1,
         speaker: "left",
-        speakerRaw: "0",
-        speakerGender: "female",
-        voiceGender: "female",
-        roleMode: "male-female",
-        leftRole: "female",
-        rightRole: "male",
-        speakerSource: "mock"
-      },
-      {
-        id: "mock-3",
-        text: "对，它也可以把不同说话人的内容做成左右气泡。",
-        start: 10.5,
-        end: 14,
-        speaker: "right",
         speakerRaw: "1",
         speakerGender: "male",
         voiceGender: "male",
+        genderConfidence: 0.9,
         roleMode: "male-female",
-        leftRole: "female",
-        rightRole: "male",
+        leftRole: "male",
+        rightRole: "female",
         speakerSource: "mock"
       }
     ]
@@ -176,7 +150,8 @@ app.get("/api/health", (req, res) => {
     qwenAudio: {
       enabled: Boolean(cleanEnv(DASHSCOPE_API_KEY)),
       model: QWEN_AUDIO_MODEL,
-      confidenceThreshold: SPEAKER_GENDER_CONFIDENCE_THRESHOLD
+      confidenceThreshold: SPEAKER_GENDER_CONFIDENCE_THRESHOLD,
+      genderMapping: "male -> left, female -> right"
     },
     video: {
       enabled: Boolean(cleanEnv(DASHSCOPE_API_KEY)),
@@ -241,17 +216,20 @@ app.post("/api/transcribe", upload.single("audio"), async (req, res) => {
         dashscopeResult.fullText
       );
 
-      speakerProfile = mergeSpeakerProfileWithOriginalSides(
+      speakerProfile = buildGenderSideSpeakerProfile(
         qwenProfile,
         dashscopeResult.segments
       );
 
       console.log("声音风格分析结果：", JSON.stringify(speakerProfile, null, 2));
     } catch (profileError) {
-      console.warn("声音风格分析失败，仅保留 Fun-ASR speaker 左右：", profileError.message);
+      console.warn("声音风格分析失败，保留 Fun-ASR 原始左右：", profileError.message);
     }
 
-    dashscopeResult.segments = attachSpeakerProfileToSegments(
+    // 关键：
+    // 这里会根据 speakerProfile 重写 speaker。
+    // male -> left，female -> right。
+    dashscopeResult.segments = applyGenderSideProfileToSegments(
       dashscopeResult.segments,
       speakerProfile
     );
@@ -263,7 +241,7 @@ app.post("/api/transcribe", upload.single("audio"), async (req, res) => {
       raw: dashscopeResult.raw,
       fileUrl: ossInfo.signedUrl,
       ossObjectName: ossInfo.objectName,
-      mode: "dashscope-fun-asr-speaker-stable-with-qwen-audio-role-profile"
+      mode: "dashscope-fun-asr-with-qwen-audio-gender-side-map"
     });
   } catch (error) {
     console.error("识别接口错误：", error);
@@ -289,7 +267,7 @@ app.post("/api/generate-stage-video", async (req, res) => {
     const speakerProfile = req.body?.speakerProfile || null;
 
     if (speakerProfile && Array.isArray(segments)) {
-      segments = attachSpeakerProfileToSegments(segments, speakerProfile);
+      segments = applyGenderSideProfileToSegments(segments, speakerProfile);
     }
 
     if (!segments.length && !fullText) {
@@ -600,6 +578,10 @@ async function analyzeSpeakerProfileWithQwenAudio(audioUrl, segments = [], fullT
 6. speakerRaw 必须和转写时间轴里的 speakerRaw 完全一致。
 7. confidence 表示你对声音风格判断的置信度，范围 0 到 1。
 
+重要映射规则：
+- male 最终会显示在左边男生上方。
+- female 最终会显示在右边女生上方。
+
 转写时间轴：
 ${speakerSummary}
 
@@ -713,13 +695,16 @@ function parseJsonFromModelText(text) {
     return JSON.parse(raw);
   } catch (error) {
     const match = raw.match(/\{[\s\S]*\}/);
-    if (!match) throw new Error(`Qwen-Audio 没有返回可解析 JSON：${raw.slice(0, 500)}`);
+    if (!match) {
+      throw new Error(`Qwen-Audio 没有返回可解析 JSON：${raw.slice(0, 500)}`);
+    }
     return JSON.parse(match[0]);
   }
 }
 
 function buildSpeakerProfileFromQwenResult(parsed, segments = []) {
   const speakers = Array.isArray(parsed?.speakers) ? parsed.speakers : [];
+
   const rawValues = Array.from(
     new Set(
       segments
@@ -784,16 +769,16 @@ function buildSpeakerProfileFromQwenResult(parsed, segments = []) {
 
   return {
     roleMode: "auto",
-    leftRole: "neutral",
-    rightRole: "neutral",
+    leftRole: "male",
+    rightRole: "female",
     speakerMap,
     source: "qwen-audio"
   };
 }
 
-function mergeSpeakerProfileWithOriginalSides(profile, segments = []) {
-  const map = profile?.speakerMap || {};
-  const sideByRaw = {};
+function buildGenderSideSpeakerProfile(profile, segments = []) {
+  const rawMap = profile?.speakerMap || {};
+  const originalSideByRaw = {};
 
   segments.forEach((item) => {
     const raw =
@@ -803,39 +788,55 @@ function mergeSpeakerProfileWithOriginalSides(profile, segments = []) {
 
     if (!raw) return;
 
-    if (!sideByRaw[raw]) {
-      sideByRaw[raw] = item.speaker === "right" ? "right" : "left";
+    if (!originalSideByRaw[raw]) {
+      originalSideByRaw[raw] = item.speaker === "right" ? "right" : "left";
     }
   });
 
   const speakerMap = {};
 
-  Object.keys(map).forEach((raw) => {
-    const gender = normalizeVoiceGender(map[raw]?.voiceGender) || "unknown";
+  Object.keys(originalSideByRaw).forEach((raw) => {
+    const qwenItem = rawMap[raw] || {};
+    const gender = normalizeVoiceGender(qwenItem.voiceGender) || "unknown";
+    const confidence = Number(qwenItem.confidence || 0);
+
+    let side = originalSideByRaw[raw];
+
+    if (gender === "male") {
+      side = "left";
+    } else if (gender === "female") {
+      side = "right";
+    }
 
     speakerMap[raw] = {
-      side: sideByRaw[raw] || "left",
+      side,
       voiceGender: gender,
-      confidence: Number(map[raw]?.confidence || 0)
+      confidence,
+      originalSide: originalSideByRaw[raw]
     };
   });
 
-  Object.keys(sideByRaw).forEach((raw) => {
-    if (!speakerMap[raw]) {
-      speakerMap[raw] = {
-        side: sideByRaw[raw],
-        voiceGender: "unknown",
-        confidence: 0
-      };
-    }
-  });
+  const values = Object.values(speakerMap);
+  const hasMale = values.some((item) => item.voiceGender === "male");
+  const hasFemale = values.some((item) => item.voiceGender === "female");
 
-  const roles = inferRolesFromSpeakerMap(speakerMap);
+  let roleMode = "auto";
+
+  if (hasMale && hasFemale) {
+    roleMode = "male-female";
+  } else if (hasMale) {
+    roleMode = "male-only";
+  } else if (hasFemale) {
+    roleMode = "female-only";
+  }
 
   return {
-    ...roles,
+    roleMode,
+    leftRole: "male",
+    rightRole: "female",
     speakerMap,
-    source: profile?.source || "qwen-audio"
+    source: "qwen-audio-gender-side-map",
+    rule: "male -> left, female -> right, unknown -> original Fun-ASR side"
   };
 }
 
@@ -853,55 +854,21 @@ function buildFallbackSpeakerProfile(segments = []) {
     speakerMap[raw] = {
       side: item.speaker === "right" ? "right" : "left",
       voiceGender: "unknown",
-      confidence: 0
+      confidence: 0,
+      originalSide: item.speaker === "right" ? "right" : "left"
     };
   });
 
-  const roles = inferRolesFromSpeakerMap(speakerMap);
-
   return {
-    ...roles,
-    speakerMap,
-    source: "fallback"
-  };
-}
-
-function inferRolesFromSpeakerMap(speakerMap = {}) {
-  const result = {
     roleMode: "auto",
-    leftRole: "neutral",
-    rightRole: "neutral"
+    leftRole: "male",
+    rightRole: "female",
+    speakerMap,
+    source: "fallback-original-side"
   };
-
-  Object.values(speakerMap).forEach((item) => {
-    const side = item.side === "right" ? "right" : "left";
-    const gender = normalizeVoiceGender(item.voiceGender) || "unknown";
-
-    if (side === "left" && gender !== "unknown") {
-      result.leftRole = gender;
-    }
-
-    if (side === "right" && gender !== "unknown") {
-      result.rightRole = gender;
-    }
-  });
-
-  if (result.leftRole === "female" && result.rightRole === "male") {
-    result.roleMode = "female-male";
-  } else if (result.leftRole === "male" && result.rightRole === "female") {
-    result.roleMode = "male-female";
-  } else if (result.leftRole === "female" && result.rightRole === "female") {
-    result.roleMode = "female-female";
-  } else if (result.leftRole === "male" && result.rightRole === "male") {
-    result.roleMode = "male-male";
-  } else if (result.leftRole !== "neutral" || result.rightRole !== "neutral") {
-    result.roleMode = "mixed-partial";
-  }
-
-  return result;
 }
 
-function attachSpeakerProfileToSegments(segments = [], speakerProfile) {
+function applyGenderSideProfileToSegments(segments = [], speakerProfile) {
   const map = speakerProfile?.speakerMap || {};
 
   return segments.map((item) => {
@@ -914,13 +881,18 @@ function attachSpeakerProfileToSegments(segments = [], speakerProfile) {
 
     return {
       ...item,
-      speaker: item.speaker,
+
+      // 关键：这里允许根据男女声重写 speaker。
+      // male -> left，female -> right。
+      speaker: profile?.side || item.speaker,
+
       speakerGender: profile?.voiceGender || "unknown",
       voiceGender: profile?.voiceGender || "unknown",
       genderConfidence: profile?.confidence || 0,
       roleMode: speakerProfile?.roleMode || "auto",
-      leftRole: speakerProfile?.leftRole || "neutral",
-      rightRole: speakerProfile?.rightRole || "neutral"
+      leftRole: "male",
+      rightRole: "female",
+      speakerSource: `${item.speakerSource || "dashscope"}+gender-side-map`
     };
   });
 }
@@ -1176,7 +1148,6 @@ async function saveGeneratedVideoToOSS(videoUrl, taskId) {
 
 function buildStageVideoPrompt(segments, fullText = "", styleHint = "") {
   const topic = buildAudioTopic(segments, fullText);
-  const roleInfo = inferVideoRoleInfoFromSegments(segments);
 
   const topicBlock = topic
     ? `Audio topic inspiration: ${topic}`
@@ -1187,87 +1158,32 @@ function buildStageVideoPrompt(segments, fullText = "", styleHint = "") {
     : "";
 
   return `
-A bright, warm, cozy 3D cartoon podcast studio, highly stylized, polished C4D / animated short film style, soft clean clay-like materials, smooth rounded shapes, cute appealing character design, bright beige and cream color palette, airy and cheerful atmosphere.
-
-IMPORTANT:
-This is a 5-second seamless idle loop video.
-Create a clean idle loop where the first frame and the last frame are visually very similar.
-The characters should return to almost the same pose at the end of the video.
-Use very small repetitive motions only, such as breathing, blinking, tiny head movement.
-Avoid one-way movements, hand waving, leaning forward, standing up, turning around, or any action that does not return to the starting pose.
-Keep all objects, microphones, furniture, and background completely stable.
-No camera movement, no zoom, no pan, no scene cut.
+A bright, warm, cozy 3D cartoon podcast studio, polished C4D / animated short film style, soft clean clay-like materials, smooth rounded shapes, cute appealing character design, bright beige and cream color palette.
 
 COMPOSITION:
-Wide full-room shot.
-The camera is fixed and placed relatively far back.
-The room should feel spacious, bright, airy, and open.
-The characters should appear smaller in the frame, while the environment occupies more of the composition.
-Show more wall, more floor, more carpet, and more empty space around the characters.
-Avoid a close-up or medium shot.
+Wide full-room shot, fixed frontal camera, no zoom, no pan.
+Left character is always a cute male podcast host.
+Right character is always a cute female podcast host.
+Both characters sit facing each other in separate white cushioned wooden armchairs.
+
+ROLE ALIGNMENT:
+Male voice corresponds to the left male host.
+Female voice corresponds to the right female host.
 
 SCENE:
-A cozy podcast studio interior with a bright warm beige wall, soft even lighting, a large textured carpet, a floor lamp on the left, a recessed wall niche shelf with small cute decorations and plants, a potted plant on the right, minimal framed wall art, and a small round table in the center.
-
-CHARACTERS:
-${roleInfo.characterPrompt}
-
-ROLE AND BUBBLE ALIGNMENT:
-The left character visually represents the left speaker in the transcript.
-The right character visually represents the right speaker in the transcript.
-The transcript speaker positions are stable:
-left role = ${roleInfo.leftRole}
-right role = ${roleInfo.rightRole}
-
-PROPORTION:
-The full bodies of both characters and the full chairs must be visible.
-The two hosts should not dominate the frame.
-The environment should feel larger than the people.
-Keep generous negative space around the characters.
-
-MICROPHONES:
-Two podcast microphones extend diagonally from the upper left and upper right toward the hosts.
-Keep the microphones elegant, slim, and visually secondary.
-Do not let the microphone arms dominate the composition.
-
-LIGHTING:
-Make the whole scene brighter, cleaner, softer, and more evenly illuminated.
-Use warm soft lighting with a bright airy feeling.
-Avoid dim corners, heavy shadows, dramatic contrast, or dark cinematic lighting.
-The image should feel warm, light, soft, and welcoming.
+A cozy podcast studio interior with a bright warm beige wall, soft even lighting, a large textured carpet, a floor lamp, niche shelf with small cute decorations and plants, potted plant, framed wall art, and a small round table.
 
 MOTION:
-Only subtle idle loop animation:
-gentle breathing,
-natural blinking,
-tiny head movement,
-very slight hand or shoulder micro-movements,
-very light body sway.
-No dramatic action.
-No large gestures.
-No strong mouth movement.
-No sudden pose changes.
-No sudden object movement.
+Only subtle idle loop animation: breathing, blinking, tiny head movement, very slight hand or shoulder micro-movements.
+No dramatic action, no large gestures, no strong mouth movement, no camera movement.
 
 LOOP RULES:
-The motion must be smooth, stable, minimal, and cyclical.
-The characters should end in a pose very similar to the initial pose.
-Avoid abrupt changes between the first and last frames.
-Avoid one-way motion that cannot loop.
-Avoid actions that clearly start and stop.
-Make the last frame visually match the first frame as closely as possible.
-
-CAMERA:
-Fixed frontal wide shot.
-No zoom.
-No pan.
-No tilt.
-No camera movement.
-No perspective change.
-No cuts.
+The first frame and last frame should be visually very similar.
+The characters should return to almost the same pose at the end.
+Avoid one-way movement or actions that cannot loop.
 
 STYLE:
-Cute 3D cartoon look, polished C4D style, clean, simplified, soft, warm, bright, friendly, not realistic, not photorealistic.
+Cute 3D cartoon look, clean, simplified, soft, warm, bright, friendly, not realistic, not photorealistic.
 
 ${topicBlock}
 
@@ -1275,61 +1191,6 @@ ${styleHintBlock}
 
 No subtitles, no text, no logo, no UI.
 `.trim();
-}
-
-function inferVideoRoleInfoFromSegments(segments = []) {
-  const gendersBySide = {
-    left: null,
-    right: null
-  };
-
-  for (const item of segments) {
-    const side = item?.speaker === "right" ? "right" : "left";
-    const gender = normalizeVoiceGender(item?.speakerGender || item?.voiceGender || item?.gender);
-
-    if (!gendersBySide[side] && gender && gender !== "unknown") {
-      gendersBySide[side] = gender;
-    }
-  }
-
-  const leftRole = gendersBySide.left || "neutral";
-  const rightRole = gendersBySide.right || "neutral";
-
-  return {
-    leftRole,
-    rightRole,
-    characterPrompt: buildCharacterPromptBySide(leftRole, rightRole)
-  };
-}
-
-function buildCharacterPromptBySide(leftRole, rightRole) {
-  const left = buildSingleCharacterPrompt("left", leftRole);
-  const right = buildSingleCharacterPrompt("right", rightRole);
-
-  return `
-Two cute podcast hosts sit facing each other in separate white cushioned wooden armchairs.
-
-Left host: ${left}
-Right host: ${right}
-`.trim();
-}
-
-function buildSingleCharacterPrompt(side, role) {
-  if (role === "female") {
-    return side === "left"
-      ? "cute young female podcast host, soft black hair, light beige hoodie, beige pants, sneakers, relaxed and friendly, sitting naturally in the left armchair."
-      : "cute young female podcast host, soft curly hair, light beige shirt, dark pants, white sneakers, relaxed and friendly, sitting naturally in the right armchair.";
-  }
-
-  if (role === "male") {
-    return side === "left"
-      ? "cute young male podcast host, black hair, light beige hoodie, beige pants, sneakers, relaxed and friendly, sitting naturally in the left armchair."
-      : "cute curly-haired male podcast host with a short beard, light beige shirt, dark pants, white sneakers, relaxed and friendly, sitting naturally in the right armchair.";
-  }
-
-  return side === "left"
-    ? "cute young neutral podcast host, black hair, light beige hoodie, beige pants, sneakers, relaxed and friendly, sitting naturally in the left armchair."
-    : "cute friendly neutral podcast host with curly hair, light beige shirt, dark pants, white sneakers, relaxed and friendly, sitting naturally in the right armchair.";
 }
 
 function buildAudioTopic(segments, fullText = "") {
@@ -1881,7 +1742,8 @@ app.listen(PORT, () => {
   console.log(`当前 mock 模式：${USE_MOCK_TRANSCRIBE}`);
   console.log("Qwen-Audio 配置：", {
     model: QWEN_AUDIO_MODEL,
-    confidenceThreshold: SPEAKER_GENDER_CONFIDENCE_THRESHOLD
+    confidenceThreshold: SPEAKER_GENDER_CONFIDENCE_THRESHOLD,
+    genderMapping: "male -> left, female -> right"
   });
   console.log("视频生成配置：", {
     model: WAN_VIDEO_MODEL,
