@@ -449,36 +449,17 @@ function createOSSClient() {
     endpoint,
     bucket: cleanEnv(ALIYUN_OSS_BUCKET),
     hasAccessKeyId: Boolean(cleanEnv(ALIYUN_ACCESS_KEY_ID)),
-    hasAccessKeySecret: Boolean(cleanEnv(ALIYUN_ACCESS_KEY_SECRET))
-  });
-
-  return new OSS({
-    region: cleanEnv(ALIYUN_OSS_REGION),
-    endpoint,
-    accessKeyId: cleanEnv(ALIYUN_ACCESS_KEY_ID),
-    accessKeySecret: cleanEnv(ALIYUN_ACCESS_KEY_SECRET),
-    bucket: cleanEnv(ALIYUN_OSS_BUCKET),
-
-    // Render 到阿里云 OSS 有时候很慢，默认 60 秒容易超时
+    hasAccessKeySecret: Boolean(cleanEnv(ALIYUN_ACCESS_KEY_SECRET)),
     timeout: 300000
   });
-}
-  const endpoint = cleanEnv(ALIYUN_OSS_ENDPOINT).replace(/\/+$/, "");
-
-  console.log("OSS Client 配置检查：", {
-    region: cleanEnv(ALIYUN_OSS_REGION),
-    endpoint,
-    bucket: cleanEnv(ALIYUN_OSS_BUCKET),
-    hasAccessKeyId: Boolean(cleanEnv(ALIYUN_ACCESS_KEY_ID)),
-    hasAccessKeySecret: Boolean(cleanEnv(ALIYUN_ACCESS_KEY_SECRET))
-  });
 
   return new OSS({
     region: cleanEnv(ALIYUN_OSS_REGION),
     endpoint,
     accessKeyId: cleanEnv(ALIYUN_ACCESS_KEY_ID),
     accessKeySecret: cleanEnv(ALIYUN_ACCESS_KEY_SECRET),
-    bucket: cleanEnv(ALIYUN_OSS_BUCKET)
+    bucket: cleanEnv(ALIYUN_OSS_BUCKET),
+    timeout: 300000
   });
 }
 
@@ -550,46 +531,6 @@ async function uploadAudioToOSS(localFilePath, filename) {
 
   throw lastError;
 }
-  const client = createOSSClient();
-
-  const ext = normalizeAudioExt(path.extname(filename));
-  const objectName = `uploads/${Date.now()}-${Math.round(Math.random() * 1e9)}${ext}`;
-
-  console.log("准备以 Buffer 方式上传音频到 OSS：", {
-    localFilePath,
-    filename,
-    objectName
-  });
-
-  if (!fs.existsSync(localFilePath)) {
-    throw new Error(`本地音频文件不存在：${localFilePath}`);
-  }
-
-  const fileBuffer = fs.readFileSync(localFilePath);
-
-  if (!fileBuffer || !fileBuffer.length) {
-    throw new Error("读取到的音频文件为空，无法上传 OSS。");
-  }
-
-  console.log("音频 Buffer 读取成功，大小：", fileBuffer.length);
-
-  await client.put(objectName, fileBuffer);
-
-  const signedUrl = client.signatureUrl(objectName, {
-    expires: 3600,
-    method: "GET"
-  });
-
-  console.log("OSS Buffer 上传成功：", {
-    objectName,
-    signedUrl
-  });
-
-  return {
-    objectName,
-    signedUrl
-  };
-}
 
 async function transcribeWithDashScope(fileUrl) {
   const submitResult = await submitDashScopeTask(fileUrl);
@@ -605,7 +546,9 @@ async function transcribeWithDashScope(fileUrl) {
   const transcriptionUrl = getTranscriptionUrl(taskResult);
 
   if (!transcriptionUrl) {
-    throw new Error(`DashScope 没有返回 transcription_url：${JSON.stringify(taskResult).slice(0, 1200)}`);
+    throw new Error(
+      `DashScope 没有返回 transcription_url：${JSON.stringify(taskResult).slice(0, 1200)}`
+    );
   }
 
   console.log("DashScope transcription_url：", transcriptionUrl);
@@ -618,16 +561,14 @@ async function transcribeWithDashScope(fileUrl) {
 
   console.log(
     "DashScope speaker 预览：",
-    parsed.segments
-      .slice(0, 18)
-      .map((item) => ({
-        text: item.text.slice(0, 20),
-        start: item.start,
-        end: item.end,
-        speaker: item.speaker,
-        speakerRaw: item.speakerRaw,
-        speakerSource: item.speakerSource
-      }))
+    parsed.segments.slice(0, 18).map((item) => ({
+      text: item.text.slice(0, 20),
+      start: item.start,
+      end: item.end,
+      speaker: item.speaker,
+      speakerRaw: item.speakerRaw,
+      speakerSource: item.speakerSource
+    }))
   );
 
   return {
@@ -826,6 +767,7 @@ function buildSpeakerProfileFromQwenResult(parsed, segments = []) {
   }
 
   const speakerMap = {};
+
   rawValues.forEach((raw, index) => {
     const profile = byRaw.get(raw) || {
       voiceGender: "unknown",
@@ -854,11 +796,13 @@ function mergeSpeakerProfileWithOriginalSides(profile, segments = []) {
   const sideByRaw = {};
 
   segments.forEach((item) => {
-    const raw = item?.speakerRaw !== null && item?.speakerRaw !== undefined
-      ? String(item.speakerRaw)
-      : "";
+    const raw =
+      item?.speakerRaw !== null && item?.speakerRaw !== undefined
+        ? String(item.speakerRaw)
+        : "";
 
     if (!raw) return;
+
     if (!sideByRaw[raw]) {
       sideByRaw[raw] = item.speaker === "right" ? "right" : "left";
     }
@@ -899,9 +843,10 @@ function buildFallbackSpeakerProfile(segments = []) {
   const speakerMap = {};
 
   segments.forEach((item) => {
-    const raw = item?.speakerRaw !== null && item?.speakerRaw !== undefined
-      ? String(item.speakerRaw)
-      : "";
+    const raw =
+      item?.speakerRaw !== null && item?.speakerRaw !== undefined
+        ? String(item.speakerRaw)
+        : "";
 
     if (!raw || speakerMap[raw]) return;
 
@@ -960,9 +905,10 @@ function attachSpeakerProfileToSegments(segments = [], speakerProfile) {
   const map = speakerProfile?.speakerMap || {};
 
   return segments.map((item) => {
-    const raw = item?.speakerRaw !== null && item?.speakerRaw !== undefined
-      ? String(item.speakerRaw)
-      : "";
+    const raw =
+      item?.speakerRaw !== null && item?.speakerRaw !== undefined
+        ? String(item.speakerRaw)
+        : "";
 
     const profile = raw ? map[raw] : null;
 
@@ -1094,6 +1040,7 @@ function getTranscriptionUrl(taskResult) {
     if (failed) {
       throw new Error(`DashScope 子任务失败：${failed.code || ""} ${failed.message || ""}`);
     }
+
     return "";
   }
 
@@ -1210,7 +1157,9 @@ async function saveGeneratedVideoToOSS(videoUrl, taskId) {
   const client = createOSSClient();
   const objectName = `generated-stage-videos/${taskId}-${Date.now()}.mp4`;
 
-  await client.put(objectName, buffer);
+  await client.put(objectName, buffer, {
+    timeout: 300000
+  });
 
   const signedUrl = client.signatureUrl(objectName, {
     expires: 7 * 24 * 60 * 60,
@@ -1394,16 +1343,15 @@ function buildAudioTopic(segments, fullText = "") {
 
   const sourceText = segmentText || fullText || "";
 
-  return String(sourceText)
-    .replace(/\s+/g, "")
-    .slice(0, 280);
+  return String(sourceText).replace(/\s+/g, "").slice(0, 280);
 }
 
 function normalizeDashScopeResult(resultJson) {
   const rawSentences = extractDashScopeSentences(resultJson);
 
   if (!rawSentences.length) {
-    const fallbackText = extractTextFromResult(resultJson) || "未识别到有效文本，请换一段更清晰的音频重试。";
+    const fallbackText =
+      extractTextFromResult(resultJson) || "未识别到有效文本，请换一段更清晰的音频重试。";
     const fallbackSegments = buildFallbackSegments(fallbackText);
 
     return {
@@ -1456,12 +1404,7 @@ function extractDashScopeSentences(resultJson) {
 }
 
 function normalizeDashScopeSentence(item, index) {
-  const text =
-    item.text ??
-    item.Text ??
-    item.sentence ??
-    item.Sentence ??
-    "";
+  const text = item.text ?? item.Text ?? item.sentence ?? item.Sentence ?? "";
 
   const beginMs =
     item.begin_time ??
@@ -1570,6 +1513,7 @@ function assignSpeakers(segments) {
   }
 
   console.log("DashScope 没有返回可靠的多人 speaker_id，启用左右轮次兜底分配。");
+
   return assignSpeakersByHeuristic(segments);
 }
 
@@ -1676,6 +1620,7 @@ function splitLongSegment(segment) {
   }
 
   const pieces = splitByPunctuationWithMinLength(text, 16, 34);
+
   return distributeSegmentTime(segment, pieces);
 }
 
@@ -1794,6 +1739,7 @@ function buildFallbackSegments(text) {
     const duration = Math.max(2.2, Math.min(5.2, piece.length * 0.22));
     const start = Number(cursor.toFixed(3));
     const end = Number((cursor + duration).toFixed(3));
+
     cursor = end;
 
     return {
@@ -1897,9 +1843,7 @@ function getAudioContentType(ext) {
 }
 
 function normalizeVideoModelName(modelName) {
-  return String(modelName || "wan2.7-t2v")
-    .trim()
-    .toLowerCase();
+  return String(modelName || "wan2.7-t2v").trim().toLowerCase();
 }
 
 function normalizeVideoDuration(value) {
