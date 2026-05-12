@@ -473,8 +473,7 @@ async function uploadAudioToOSS(localFilePath, filename) {
 
   await client.put(objectName, fileBuffer, {
     headers: {
-      "Content-Type": contentType,
-      "Content-Length": fileBuffer.length
+      "Content-Type": contentType
     }
   });
 
@@ -871,9 +870,7 @@ function attachSpeakerProfileToSegments(segments = [], speakerProfile) {
 
     return {
       ...item,
-
       speaker: item.speaker,
-
       speakerGender: profile?.voiceGender || "unknown",
       voiceGender: profile?.voiceGender || "unknown",
       genderConfidence: profile?.confidence || 0,
