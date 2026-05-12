@@ -25,7 +25,9 @@ const DASHSCOPE_SUBMIT_URL =
   "https://dashscope.aliyuncs.com/api/v1/services/audio/asr/transcription";
 const DASHSCOPE_TASK_URL = "https://dashscope.aliyuncs.com/api/v1/tasks";
 
-const QWEN_AUDIO_MODEL = process.env.QWEN_AUDIO_MODEL || "qwen-audio-turbo-latest";
+const QWEN_AUDIO_MODEL =
+  process.env.QWEN_AUDIO_MODEL || "qwen-audio-turbo-latest";
+
 const QWEN_MULTIMODAL_URL =
   process.env.QWEN_MULTIMODAL_URL ||
   "https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation";
@@ -37,11 +39,17 @@ const VIDEO_GENERATION_SUBMIT_URL =
 const WAN_VIDEO_MODEL = normalizeVideoModelName(
   process.env.WAN_VIDEO_MODEL || "wan2.7-t2v"
 );
-const WAN_VIDEO_DURATION = normalizeVideoDuration(process.env.WAN_VIDEO_DURATION || 5);
+
+const WAN_VIDEO_DURATION = normalizeVideoDuration(
+  process.env.WAN_VIDEO_DURATION || 5
+);
+
 const WAN_VIDEO_RATIO = process.env.WAN_VIDEO_RATIO || "16:9";
+
 const WAN_VIDEO_RESOLUTION = normalizeWanResolution(
   process.env.WAN_VIDEO_RESOLUTION || process.env.WAN_VIDEO_SIZE || "720P"
 );
+
 const WAN_VIDEO_SEED = process.env.WAN_VIDEO_SEED
   ? Number(process.env.WAN_VIDEO_SEED)
   : undefined;
@@ -82,6 +90,10 @@ function cleanEnv(value) {
   return String(value || "").trim();
 }
 
+function wait(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 function getMockTranscript() {
   const speakerProfile = {
     roleMode: "male-female",
@@ -91,15 +103,18 @@ function getMockTranscript() {
       "0": {
         side: "right",
         voiceGender: "female",
-        confidence: 0.9
+        confidence: 0.9,
+        originalSide: "left"
       },
       "1": {
         side: "left",
         voiceGender: "male",
-        confidence: 0.9
+        confidence: 0.8,
+        originalSide: "right"
       }
     },
-    source: "mock-gender-map"
+    source: "mock-gender-side-map",
+    rule: "male -> left, female -> right"
   };
 
   return {
@@ -131,7 +146,7 @@ function getMockTranscript() {
         speakerRaw: "1",
         speakerGender: "male",
         voiceGender: "male",
-        genderConfidence: 0.9,
+        genderConfidence: 0.8,
         roleMode: "male-female",
         leftRole: "male",
         rightRole: "female",
@@ -226,9 +241,6 @@ app.post("/api/transcribe", upload.single("audio"), async (req, res) => {
       console.warn("声音风格分析失败，保留 Fun-ASR 原始左右：", profileError.message);
     }
 
-    // 关键：
-    // 这里会根据 speakerProfile 重写 speaker。
-    // male -> left，female -> right。
     dashscopeResult.segments = applyGenderSideProfileToSegments(
       dashscopeResult.segments,
       speakerProfile
@@ -661,6 +673,7 @@ function buildSpeakerSummaryForProfile(segments = [], fullText = "") {
       const start = Number(item?.start || 0).toFixed(2);
       const end = Number(item?.end || 0).toFixed(2);
       const text = String(item?.text || "").slice(0, 90);
+
       return `#${index + 1} speakerRaw=${raw}, side=${side}, time=${start}-${end}, text=${text}`;
     })
     .join("\n");
@@ -689,17 +702,61 @@ function extractQwenMessageText(data) {
 }
 
 function parseJsonFromModelText(text) {
-  const raw = String(text || "").trim();
+  let raw = String(text || "").trim();
+
+  raw = raw
+    .replace(/^```json\s*/i, "")
+    .replace(/^```\s*/i, "")
+    .replace(/```$/i, "")
+    .trim();
+
+  const firstBrace = raw.indexOf("{");
+  const lastBrace = raw.lastIndexOf("}");
+
+  if (firstBrace >= 0 && lastBrace > firstBrace) {
+    raw = raw.slice(firstBrace, lastBrace + 1);
+  }
 
   try {
     return JSON.parse(raw);
   } catch (error) {
-    const match = raw.match(/\{[\s\S]*\}/);
-    if (!match) {
-      throw new Error(`Qwen-Audio 没有返回可解析 JSON：${raw.slice(0, 500)}`);
-    }
-    return JSON.parse(match[0]);
+    console.warn("Qwen JSON 直接解析失败，尝试修复：", error.message);
   }
+
+  const repaired = raw
+    .replace(/,\s*]/g, "]")
+    .replace(/,\s*}/g, "}")
+    .replace(/[“”]/g, '"')
+    .replace(/[‘’]/g, "'");
+
+  try {
+    return JSON.parse(repaired);
+  } catch (error) {
+    console.warn("Qwen JSON 修复解析失败，尝试正则提取 speaker：", error.message);
+  }
+
+  const speakers = [];
+
+  const speakerRegex =
+    /"speakerRaw"\s*:\s*"([^"]+)"[\s\S]*?"voiceGender"\s*:\s*"([^"]+)"[\s\S]*?"confidence"\s*:\s*([0-9.]+)/g;
+
+  let match;
+
+  while ((match = speakerRegex.exec(raw))) {
+    speakers.push({
+      speakerRaw: match[1],
+      voiceGender: match[2],
+      confidence: Number(match[3])
+    });
+  }
+
+  if (speakers.length) {
+    return {
+      speakers
+    };
+  }
+
+  throw new Error(`Qwen-Audio 没有返回可解析 JSON：${String(text || "").slice(0, 500)}`);
 }
 
 function buildSpeakerProfileFromQwenResult(parsed, segments = []) {
@@ -751,6 +808,26 @@ function buildSpeakerProfileFromQwenResult(parsed, segments = []) {
     });
   }
 
+  if (rawValues.length === 2 && byRaw.size === 1) {
+    const knownRaw = Array.from(byRaw.keys())[0];
+    const known = byRaw.get(knownRaw);
+    const otherRaw = rawValues.find((raw) => raw !== knownRaw);
+
+    if (otherRaw && known?.voiceGender === "female") {
+      byRaw.set(otherRaw, {
+        voiceGender: "male",
+        confidence: Math.max(0.68, Number(known.confidence || 0) - 0.1)
+      });
+    }
+
+    if (otherRaw && known?.voiceGender === "male") {
+      byRaw.set(otherRaw, {
+        voiceGender: "female",
+        confidence: Math.max(0.68, Number(known.confidence || 0) - 0.1)
+      });
+    }
+  }
+
   const speakerMap = {};
 
   rawValues.forEach((raw, index) => {
@@ -766,6 +843,8 @@ function buildSpeakerProfileFromQwenResult(parsed, segments = []) {
       originalIndex: index
     };
   });
+
+  console.log("Qwen-Audio 解析后的 speakerMap：", speakerMap);
 
   return {
     roleMode: "auto",
@@ -881,11 +960,7 @@ function applyGenderSideProfileToSegments(segments = [], speakerProfile) {
 
     return {
       ...item,
-
-      // 关键：这里允许根据男女声重写 speaker。
-      // male -> left，female -> right。
       speaker: profile?.side || item.speaker,
-
       speakerGender: profile?.voiceGender || "unknown",
       voiceGender: profile?.voiceGender || "unknown",
       genderConfidence: profile?.confidence || 0,
@@ -1009,6 +1084,7 @@ function getTranscriptionUrl(taskResult) {
 
   if (!successItem) {
     const failed = results.find((item) => item.subtask_status === "FAILED");
+
     if (failed) {
       throw new Error(`DashScope 子任务失败：${failed.code || ""} ${failed.message || ""}`);
     }
@@ -1213,6 +1289,7 @@ function normalizeDashScopeResult(resultJson) {
   if (!rawSentences.length) {
     const fallbackText =
       extractTextFromResult(resultJson) || "未识别到有效文本，请换一段更清晰的音频重试。";
+
     const fallbackSegments = buildFallbackSegments(fallbackText);
 
     return {
@@ -1558,6 +1635,7 @@ function distributeSegmentTime(segment, pieces) {
 
   return pieces.map((piece, index) => {
     const isLast = index === pieces.length - 1;
+
     const duration = isLast
       ? Math.max(0.35, segment.end - cursor)
       : Math.max(0.35, totalDuration * (piece.length / totalChars));
@@ -1722,10 +1800,6 @@ function normalizeWanResolution(value) {
   if (raw.includes("720")) return "720P";
 
   return "720P";
-}
-
-function wait(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 app.use((error, req, res, next) => {
